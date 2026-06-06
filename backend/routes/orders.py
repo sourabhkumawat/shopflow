@@ -1,6 +1,5 @@
-import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from db import get_db
 from models import Order, OrderItem, Payment
 from schemas import OrderOut
@@ -12,36 +11,17 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 def get_orders_by_email(email: str, db: Session = Depends(get_db)):
     """
     Returns all orders for a given email address, with items and payment history.
-
-    🐛 BUG (N+1): For every order row, two additional SELECT queries are fired —
-    one for order_items and one for payments. With 50 orders that is 101 queries.
-    At p99 this causes >4 s response times and has tripped the 200 ms SLA alert
-    three times in the past week.
-
-    Fix: use joinedload / subqueryload, or rewrite as a single JOIN query.
     """
     orders = (
         db.query(Order)
+        .options(
+            joinedload(Order.items),
+            joinedload(Order.payments),
+        )
         .filter(Order.user_email == email)
         .order_by(Order.created_at.desc())
         .all()
     )
-
-    if orders:
-        actual_queries = 1 + len(orders) * 2
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("bug_type", "n_plus_1")
-            scope.set_context("query_debug", {
-                "email": email,
-                "order_count": len(orders),
-                "actual_queries": actual_queries,
-                "optimal_queries": 1,
-            })
-            sentry_sdk.capture_message(
-                f"N+1QueryBug: {len(orders)} orders for {email} triggered {actual_queries} DB queries (should be 1)",
-                level="warning",
-                scope=scope,
-            )
 
     result = []
     for order in orders:
@@ -57,12 +37,6 @@ def get_orders_by_email(email: str, db: Session = Depends(get_db)):
             "created_at":      order.created_at,
         }
 
-        # 🐛 BUG N+1 — separate query per order for items
-        items = (
-            db.query(OrderItem)
-            .filter(OrderItem.order_id == order.id)
-            .all()
-        )
         order_dict["items"] = [
             {
                 "product_id":   i.product_id,
@@ -71,16 +45,9 @@ def get_orders_by_email(email: str, db: Session = Depends(get_db)):
                 "unit_price":   float(i.unit_price),
                 "total_price":  float(i.total_price),
             }
-            for i in items
+            for i in order.items
         ]
 
-        # 🐛 BUG N+1 — separate query per order for payments
-        payments = (
-            db.query(Payment)
-            .filter(Payment.order_id == order.id)
-            .order_by(Payment.created_at)
-            .all()
-        )
         order_dict["payments"] = [
             {
                 "id":             p.id,
@@ -89,7 +56,7 @@ def get_orders_by_email(email: str, db: Session = Depends(get_db)):
                 "payment_method": p.payment_method,
                 "created_at":     p.created_at,
             }
-            for p in payments
+            for p in sorted(order.payments, key=lambda payment: payment.created_at)
         ]
 
         result.append(order_dict)
