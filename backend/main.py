@@ -2,6 +2,7 @@ import os
 import sentry_sdk
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
@@ -67,6 +68,8 @@ def health():
 
 @app.get("/sentry-debug")
 async def trigger_error():
+    if os.getenv("ENV", "development").lower() == "production":
+        raise HTTPException(status_code=404, detail="Not found")
     division_by_zero = 1 / 0
 
 
